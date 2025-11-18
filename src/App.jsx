@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useRef } from 'react'
 import Spline from '@splinetool/react-spline'
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000'
@@ -85,6 +85,109 @@ function QueryBox({ onQuery, loading, results }) {
   )
 }
 
+function AgentBox() {
+  const [prompt, setPrompt] = useState('')
+  const [streaming, setStreaming] = useState(false)
+  const [events, setEvents] = useState([])
+  const abortRef = useRef(null)
+
+  const startAgent = async () => {
+    if (!prompt.trim()) return
+    setEvents([])
+    setStreaming(true)
+
+    const controller = new AbortController()
+    abortRef.current = controller
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/agent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, top_k: 5 }),
+        signal: controller.signal,
+      })
+
+      if (!res.ok || !res.body) throw new Error('Failed to start stream')
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() || ''
+        for (const chunk of parts) {
+          const line = chunk.trim().split('\n').find(l => l.startsWith('data:'))
+          if (!line) continue
+          const payload = line.replace(/^data:\s*/, '')
+          if (payload === '[DONE]') {
+            setEvents(prev => [...prev, { type: 'done' }])
+            break
+          }
+          try {
+            const obj = JSON.parse(payload)
+            setEvents(prev => [...prev, obj])
+          } catch {}
+        }
+      }
+    } catch (e) {
+      setEvents(prev => [...prev, { type: 'error', value: e.message }])
+    } finally {
+      setStreaming(false)
+    }
+  }
+
+  const stopAgent = () => {
+    abortRef.current?.abort()
+  }
+
+  return (
+    <div className="bg-white/5 border border-white/10 rounded-xl p-4">
+      <div className="flex items-center gap-2">
+        <input
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder="Ask the Agent to research using your docs..."
+          className="flex-1 bg-transparent outline-none text-white placeholder-white/40 px-3 py-2"
+        />
+        {!streaming ? (
+          <button onClick={startAgent} className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white">Run</button>
+        ) : (
+          <button onClick={stopAgent} className="px-4 py-2 rounded-lg bg-red-500 hover:bg-red-600 text-white">Stop</button>
+        )}
+      </div>
+
+      <div className="mt-4 max-h-64 overflow-auto space-y-2">
+        {events.map((ev, i) => (
+          <div key={i} className="text-sm text-white/90 bg-black/20 border border-white/10 rounded p-2">
+            {ev.type === 'status' && <p className="text-white/70">{ev.value}</p>}
+            {ev.type === 'thought' && <p className="text-blue-300">{ev.value}</p>}
+            {ev.type === 'retrieved' && <p className="text-white/70">Retrieved {ev.count} snippets</p>}
+            {ev.type === 'context' && (
+              <div>
+                <p className="text-white/60">Context #{ev.index + 1}</p>
+                <p className="text-white/90 whitespace-pre-wrap">{ev.snippet}</p>
+              </div>
+            )}
+            {ev.type === 'final' && (
+              <div>
+                <p className="font-semibold text-emerald-300">Answer</p>
+                <p className="whitespace-pre-wrap">{ev.answer}</p>
+              </div>
+            )}
+            {ev.type === 'error' && <p className="text-red-400">{ev.value}</p>}
+            {ev.type === 'done' && <p className="text-white/50 italic">Done</p>}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [uploads, setUploads] = useState([])
   const [queryLoading, setQueryLoading] = useState(false)
@@ -147,8 +250,8 @@ function App() {
               Drop files, we optimally chunk and embed them automatically. Ask questions and get relevant answers fast.
             </p>
           </div>
-          <div className="mt-8 grid sm:grid-cols-2 gap-6">
-            <div className="bg-black/30 backdrop-blur border border-white/10 rounded-2xl p-5">
+          <div className="mt-8 grid lg:grid-cols-3 sm:grid-cols-2 grid-cols-1 gap-6">
+            <div className="bg-black/30 backdrop-blur border border-white/10 rounded-2xl p-5 lg:col-span-1 col-span-1">
               <FileDropzone onFiles={handleFiles} />
               <div className="mt-4 divide-y divide-white/10">
                 {uploads.length === 0 && <p className="text-sm text-white/50">No uploads yet.</p>}
@@ -157,8 +260,11 @@ function App() {
                 ))}
               </div>
             </div>
-            <div className="bg-black/30 backdrop-blur border border-white/10 rounded-2xl p-5">
+            <div className="bg-black/30 backdrop-blur border border-white/10 rounded-2xl p-5 lg:col-span-1 col-span-1">
               <QueryBox onQuery={runQuery} loading={queryLoading} results={results} />
+            </div>
+            <div className="bg-black/30 backdrop-blur border border-white/10 rounded-2xl p-5 lg:col-span-1 col-span-1">
+              <AgentBox />
             </div>
           </div>
         </div>
